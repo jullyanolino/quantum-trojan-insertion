@@ -11,13 +11,13 @@ from qiskit import QuantumCircuit, transpile, ClassicalRegister, QuantumRegister
 from qiskit.dagcircuit import DAGCircuit
 from qiskit.converters import circuit_to_dag, dag_to_circuit
 from qiskit_aer import AerSimulator
-from qiskit.providers.fake_provider import FakeVigo
 from qiskit.visualization import plot_histogram, circuit_drawer
 import random
 import copy
 import base64
 import io
 
+# Import our Quantum Trojan implementation
 from quantum_trojan_inserter import (
     QuantumTrojanInserter,
     create_benchmark_circuits
@@ -74,126 +74,8 @@ if 'trojan_analysis_complete' not in st.session_state:
 if 'analysis_results' not in st.session_state:
     st.session_state.analysis_results = {}
 
-class QuantumTrojanInserter:
-    """Quantum Trojan Inserter implementation for Streamlit demo"""
-    
-    def __init__(self, control_qubit_index: int = 0):
-        self.control_qubit_index = control_qubit_index
-        self.simulator = AerSimulator()
-        
-    def find_empty_positions(self, circuit: QuantumCircuit) -> list:
-        """Find empty positions in circuit layers"""
-        dag = circuit_to_dag(circuit)
-        layers = list(dag.layers())
-        empty_positions = []
-        
-        total_qubits = circuit.num_qubits
-        
-        for layer in layers:
-            used_qubits = set()
-            for node in layer['graph'].op_nodes():
-                for qubit in node.qargs:
-                    used_qubits.add(circuit.qubits.index(qubit))
-            
-            all_qubits = set(range(total_qubits))
-            empty_qubits = sorted(list(all_qubits - used_qubits))
-            empty_positions.append(empty_qubits)
-            
-        return empty_positions
-    
-    def insert_controlled_trojan(self, circuit, gate_limit=5, activation_prob=0.1):
-        """Insert controlled Trojan gates"""
-        trojan_circuit = circuit.copy()
-        empty_positions = self.find_empty_positions(circuit)
-        
-        if not empty_positions:
-            return trojan_circuit
-        
-        gates_inserted = 0
-        trojan_gates_info = []  # Track inserted gates for visualization
-        
-        # Insert control gate
-        if len(empty_positions) > 0 and self.control_qubit_index in empty_positions[0]:
-            if random.random() < activation_prob:
-                trojan_circuit.x(self.control_qubit_index)
-                trojan_gates_info.append(('X', self.control_qubit_index, None, 0))
-            gates_inserted += 1
-        
-        # Insert controlled gates
-        for layer_idx, empty_qubits in enumerate(empty_positions[1:], 1):
-            if gates_inserted >= gate_limit:
-                break
-                
-            available_qubits = [q for q in empty_qubits if q != self.control_qubit_index]
-            
-            if available_qubits:
-                target_qubit = random.choice(available_qubits)
-                trojan_circuit.cx(self.control_qubit_index, target_qubit)
-                trojan_gates_info.append(('CX', self.control_qubit_index, target_qubit, layer_idx))
-                gates_inserted += 1
-        
-        return trojan_circuit, trojan_gates_info
-    
-    def calculate_tvd(self, counts1, counts2, total_shots):
-        """Calculate Total Variation Distance"""
-        all_outcomes = set(counts1.keys()) | set(counts2.keys())
-        tvd = 0.0
-        for outcome in all_outcomes:
-            prob1 = counts1.get(outcome, 0) / total_shots
-            prob2 = counts2.get(outcome, 0) / total_shots
-            tvd += abs(prob1 - prob2)
-        return tvd / 2.0
-    
-    def simulate_circuit(self, circuit, shots=1000):
-        """Simulate quantum circuit"""
-        sim_circuit = circuit.copy()
-        
-        if sim_circuit.num_clbits == 0:
-            sim_circuit.add_register(ClassicalRegister(sim_circuit.num_qubits))
-        sim_circuit.measure_all()
-        
-        fake_backend = FakeVigo()
-        transpiled = transpile(sim_circuit, fake_backend)
-        job = self.simulator.run(transpiled, shots=shots)
-        return job.result().get_counts()
-
-def create_benchmark_circuits():
-    """Create benchmark quantum circuits"""
-    circuits = {}
-    
-    # Bell State
-    bell = QuantumCircuit(2, name="Bell_State")
-    bell.h(0)
-    bell.cx(0, 1)
-    circuits["Bell State"] = bell
-    
-    # GHZ State
-    ghz = QuantumCircuit(3, name="GHZ_State")
-    ghz.h(0)
-    ghz.cx(0, 1)
-    ghz.cx(0, 2)
-    circuits["GHZ State"] = ghz
-    
-    # Simple ALU
-    alu = QuantumCircuit(4, name="mini_ALU")
-    alu.h(0)
-    alu.cx(0, 1)
-    alu.cx(1, 2)
-    alu.ccx(0, 1, 3)
-    circuits["Mini ALU"] = alu
-    
-    # QFT
-    qft = QuantumCircuit(4, name="QFT")
-    qft.h(0)
-    qft.cp(np.pi/2, 0, 1)
-    qft.h(1)
-    qft.cp(np.pi/2, 1, 2)
-    qft.h(2)
-    qft.cp(np.pi/2, 2, 3)
-    qft.h(3)
-    circuits["QFT (4-qubit)"] = qft
-    
-    return circuits
+# Note: The QuantumTrojanInserter class is now imported from quantum_trojan_inserter.py
+# We no longer need to redefine it here
 
 def main():
     """Main Streamlit application"""
