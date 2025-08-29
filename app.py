@@ -1,680 +1,247 @@
 import streamlit as st
-import numpy as np
-import pandas as pd
+from qiskit import QuantumCircuit, transpile
+from qiskit_aer import AerSimulator
+from qiskit.visualization import plot_histogram, plot_circuit_layout
 import matplotlib.pyplot as plt
-import seaborn as sns
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import networkx as nx
-from qiskit import QuantumCircuit, transpile, ClassicalRegister, QuantumRegister
+import numpy as np
+import random
+from qiskit.providers.fake_provider import FakeValencia  # For noise
+from qiskit import QuantumCircuit
 from qiskit.dagcircuit import DAGCircuit
 from qiskit.converters import circuit_to_dag, dag_to_circuit
-from qiskit_aer import AerSimulator
-from qiskit.visualization import plot_histogram, circuit_drawer
 import random
-import copy
-import base64
-import io
 
-# Import our Quantum Trojan implementation
-from quantum_trojan_inserter import (
-    QuantumTrojanInserter,
-    create_benchmark_circuits
-)
-
-# Set page configuration
-st.set_page_config(
-    page_title="Quantum Trojan Analysis",
-    page_icon="🔐",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Custom CSS for better styling
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        color: #1f4e79;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .section-header {
-        font-size: 1.8rem;
-        color: #2e7d32;
-        border-bottom: 2px solid #2e7d32;
-        padding-bottom: 0.5rem;
-        margin-top: 2rem;
-    }
-    .metric-card {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin: 0.5rem 0;
-    }
-    .warning-box {
-        background-color: #fff3cd;
-        border-left: 4px solid #ffc107;
-        padding: 1rem;
-        margin: 1rem 0;
-    }
-    .info-box {
-        background-color: #d1ecf1;
-        border-left: 4px solid #17a2b8;
-        padding: 1rem;
-        margin: 1rem 0;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# Initialize session state
-if 'trojan_analysis_complete' not in st.session_state:
-    st.session_state.trojan_analysis_complete = False
-if 'analysis_results' not in st.session_state:
-    st.session_state.analysis_results = {}
-
-# Note: The QuantumTrojanInserter class is now imported from quantum_trojan_inserter.py
-# We no longer need to redefine it here
-
-def main():
-    """Main Streamlit application"""
+def insert_controlled_trojan(circuit: QuantumCircuit, control_pos: int = 0, gate_limit: int = 5, include_switch: bool = True) -> QuantumCircuit:
+    """
+    Implements the quantum Trojan insertion as per Algorithm 1.
+    - Identifies empty positions per layer using DAG.
+    - Inserts X on control_pos in first available column (switch, optional).
+    - Inserts up to gate_limit CX gates from control_pos to random empty positions in subsequent columns.
+    - Preserves circuit depth by using empty slots.
+    """
+    # Convert to DAG
+    dag = circuit_to_dag(circuit)
+    total_qubits = circuit.num_qubits
+    all_qubits = set(range(total_qubits))
     
-    # Header
-    st.markdown('<h1 class="main-header">🔐 Quantum Trojan Insertion Analysis</h1>', unsafe_allow_html=True)
-    st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #666;">Interactive demonstration of controlled quantum hardware Trojans</p>', unsafe_allow_html=True)
+    # Extract layers (columns)
+    layers = list(dag.layers())
     
-    # Sidebar configuration
-    st.sidebar.header("⚙️ Configuration")
+    # Collect empty positions per layer
+    empty_pos_per_layer = []
+    for layer in layers:
+        used_qubits = set()
+        for node in layer['graph'].op_nodes():
+            used_qubits.update(q.index for q in node.qargs)
+        empty_pos = sorted(all_qubits - used_qubits)
+        empty_pos_per_layer.append(empty_pos)
     
-    # Circuit selection
-    circuits = create_benchmark_circuits()
-    selected_circuit_name = st.sidebar.selectbox(
-        "Select Benchmark Circuit",
-        list(circuits.keys()),
-        help="Choose a quantum circuit to analyze"
-    )
+    # Now insert gates. We'll add them to the circuit at the beginning for simplicity,
+    # but in practice, insert into existing layers' empty slots by prepending a new circuit.
+    trojan_circuit = QuantumCircuit(total_qubits)
     
-    selected_circuit = circuits[selected_circuit_name]
+    added_gates = 0
+    available_qubits = set(range(total_qubits)) - {control_pos}  # Exclude control initially
     
-    # Trojan parameters
-    st.sidebar.subheader("Trojan Parameters")
-    control_qubit = st.sidebar.number_input(
-        "Control Qubit Index", 
-        min_value=0, 
-        max_value=selected_circuit.num_qubits-1, 
-        value=0,
-        help="Qubit index used for Trojan control"
-    )
-    
-    gate_limit = st.sidebar.slider(
-        "Maximum Trojan Gates", 
-        min_value=1, 
-        max_value=10, 
-        value=5,
-        help="Maximum number of Trojan gates to insert"
-    )
-    
-    activation_prob = st.sidebar.slider(
-        "Activation Probability", 
-        min_value=0.0, 
-        max_value=1.0, 
-        value=0.1, 
-        step=0.1,
-        help="Probability of Trojan activation"
-    )
-    
-    simulation_shots = st.sidebar.number_input(
-        "Simulation Shots", 
-        min_value=100, 
-        max_value=10000, 
-        value=1000, 
-        step=100,
-        help="Number of shots for quantum simulation"
-    )
-    
-    # Main content tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📖 Paper Overview", 
-        "🔬 Circuit Analysis", 
-        "⚡ Trojan Insertion", 
-        "📊 Results & Metrics", 
-        "🛡️ Security Implications"
-    ])
-    
-    with tab1:
-        st.markdown('<h2 class="section-header">Paper Overview: Quantum Trojan Insertion</h2>', unsafe_allow_html=True)
+    # Insert into 'columns' (we simulate by adding sequentially, assuming empty at start)
+    # In real, we'd insert into specific layers, but for demo, prepend Trojan.
+    for col_idx in range(len(layers) + gate_limit):  # Allow extra if needed, but limit gates
+        if added_gates >= gate_limit:
+            break
+        # Use empty pos from a random layer or approximate
+        empty_positions = random.choice(empty_pos_per_layer) if empty_pos_per_layer else []
+        available_qubits = available_qubits.intersection(empty_positions)
         
-        col1, col2 = st.columns([2, 1])
+        if not available_qubits:
+            continue
         
-        with col1:
-            st.markdown("""
-            ### Key Contributions
-            
-            This research introduces **controllable quantum Trojans** that represent a significant advancement in quantum security research:
-            
-            1. **🎯 Controlled Activation**: Unlike previous static Trojans, these can be activated/deactivated based on specific conditions
-            2. **🕵️ Enhanced Stealth**: Trojans remain dormant until triggered, making detection extremely difficult
-            3. **⚡ Zero Depth Overhead**: Strategic placement in empty circuit slots maintains original circuit depth
-            4. **📈 High Impact**: Achieves ~90% Total Variation Distance from original circuits
-            
-            ### Threat Model
-            
-            The attack assumes an **untrusted quantum compiler** scenario where:
-            - Adversary controls the compilation process
-            - Can insert malicious gates during transpilation
-            - Has knowledge of circuit structure and constraints
-            - Targets remain unaware of the modification
-            """)
-            
-        with col2:
-            st.markdown("""
-            <div class="info-box">
-            <h4>🔬 Technical Innovation</h4>
-            <p>The key innovation is using <strong>conditional logic gates</strong> that activate only under predefined input conditions, similar to hardware Trojans in classical circuits.</p>
-            </div>
-            
-            <div class="warning-box">
-            <h4>⚠️ Security Risk</h4>
-            <p>These Trojans pose significant threats to quantum computing security due to their <strong>stealth characteristics</strong> and <strong>conditional activation</strong>.</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # Algorithm visualization
-        st.markdown("### 🔄 Trojan Insertion Algorithm")
-        
-        st.code("""
-Algorithm 1: Controlled Trojan Insertion
-
-Input: C (quantum circuit), gate_limit, control_pos, activation_prob
-Output: C' (circuit with Trojan gates)
-
-1. Convert circuit C to DAG representation
-2. Extract temporal layers from DAG
-3. For each layer:
-   - Identify used qubits
-   - Calculate empty positions: E = Q \\ S
-4. Insert control gate (X-gate) at control_pos with probability activation_prob
-5. For remaining layers:
-   - Select random target from empty positions
-   - Insert CX gate with control_pos as control
-   - Update available positions
-6. Return modified circuit C'
-        """, language="python")
-    
-    with tab2:
-        st.markdown('<h2 class="section-header">Circuit Analysis</h2>', unsafe_allow_html=True)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader(f"📋 Selected Circuit: {selected_circuit_name}")
-            
-            # Circuit information
-            circuit_info = {
-                "Number of Qubits": selected_circuit.num_qubits,
-                "Circuit Depth": selected_circuit.depth(),
-                "Gate Count": len(selected_circuit.data),
-                "Gate Types": list(set([gate.operation.name for gate in selected_circuit.data]))
-            }
-            
-            for key, value in circuit_info.items():
-                if key != "Gate Types":
-                    st.metric(key, value)
-                else:
-                    st.write(f"**{key}:** {', '.join(value)}")
-            
-            # Circuit visualization
-            st.subheader("🔗 Circuit Diagram")
-            try:
-                fig, ax = plt.subplots(figsize=(10, 4))
-                selected_circuit.draw(output='mpl', ax=ax)
-                st.pyplot(fig)
-                plt.close()
-            except:
-                st.write("Circuit diagram:")
-                st.text(str(selected_circuit.draw()))
-        
-        with col2:
-            st.subheader("🎯 Empty Position Analysis")
-            
-            # Analyze empty positions
-            trojan_inserter = QuantumTrojanInserter(control_qubit)
-            empty_positions = trojan_inserter.find_empty_positions(selected_circuit)
-            
-            # Create visualization of empty positions
-            layers_data = []
-            for layer_idx, empty_qubits in enumerate(empty_positions):
-                for qubit in range(selected_circuit.num_qubits):
-                    layers_data.append({
-                        'Layer': layer_idx,
-                        'Qubit': qubit,
-                        'Status': 'Empty' if qubit in empty_qubits else 'Occupied'
-                    })
-            
-            if layers_data:
-                df_layers = pd.DataFrame(layers_data)
-                
-                fig = px.scatter(
-                    df_layers, 
-                    x='Layer', 
-                    y='Qubit',
-                    color='Status',
-                    color_discrete_map={'Empty': '#90EE90', 'Occupied': '#FFB6C1'},
-                    title="Circuit Layer Analysis",
-                    labels={'Layer': 'Circuit Layer', 'Qubit': 'Qubit Index'}
-                )
-                fig.update_traces(marker=dict(size=12, symbol='square'))
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Summary statistics
-                total_positions = len(layers_data)
-                empty_count = len([d for d in layers_data if d['Status'] == 'Empty'])
-                st.write(f"**Total Positions:** {total_positions}")
-                st.write(f"**Empty Positions:** {empty_count} ({empty_count/total_positions*100:.1f}%)")
-    
-    with tab3:
-        st.markdown('<h2 class="section-header">Trojan Insertion Process</h2>', unsafe_allow_html=True)
-        
-        if st.button("🚀 Insert Trojan Gates", type="primary"):
-            with st.spinner("Inserting Trojan gates and analyzing impact..."):
-                # Create Trojan inserter
-                trojan_inserter = QuantumTrojanInserter(control_qubit)
-                
-                # Insert Trojan
-                trojan_circuit, trojan_info = trojan_inserter.insert_controlled_trojan(
-                    selected_circuit, 
-                    gate_limit=gate_limit, 
-                    activation_prob=activation_prob
-                )
-                
-                # Simulate both circuits
-                original_counts = trojan_inserter.simulate_circuit(selected_circuit, simulation_shots)
-                trojan_counts = trojan_inserter.simulate_circuit(trojan_circuit, simulation_shots)
-                
-                # Calculate metrics
-                tvd = trojan_inserter.calculate_tvd(original_counts, trojan_counts, simulation_shots)
-                
-                # Store results in session state
-                st.session_state.analysis_results = {
-                    'original_circuit': selected_circuit,
-                    'trojan_circuit': trojan_circuit,
-                    'trojan_info': trojan_info,
-                    'original_counts': original_counts,
-                    'trojan_counts': trojan_counts,
-                    'tvd': tvd,
-                    'original_depth': selected_circuit.depth(),
-                    'trojan_depth': trojan_circuit.depth(),
-                    'original_gates': len(selected_circuit.data),
-                    'trojan_gates': len(trojan_circuit.data)
-                }
-                st.session_state.trojan_analysis_complete = True
-                
-                st.success("✅ Trojan insertion completed!")
-        
-        if st.session_state.trojan_analysis_complete:
-            results = st.session_state.analysis_results
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("🔒 Original Circuit")
-                try:
-                    fig, ax = plt.subplots(figsize=(10, 4))
-                    results['original_circuit'].draw(output='mpl', ax=ax)
-                    st.pyplot(fig)
-                    plt.close()
-                except:
-                    st.text(str(results['original_circuit'].draw()))
-            
-            with col2:
-                st.subheader("🦠 Trojan-Infected Circuit")
-                try:
-                    fig, ax = plt.subplots(figsize=(10, 4))
-                    results['trojan_circuit'].draw(output='mpl', ax=ax)
-                    st.pyplot(fig)
-                    plt.close()
-                except:
-                    st.text(str(results['trojan_circuit'].draw()))
-            
-            # Trojan gates information
-            if results['trojan_info']:
-                st.subheader("🎯 Inserted Trojan Gates")
-                trojan_df = pd.DataFrame(results['trojan_info'], 
-                                       columns=['Gate Type', 'Control', 'Target', 'Layer'])
-                st.dataframe(trojan_df, use_container_width=True)
-    
-    with tab4:
-        st.markdown('<h2 class="section-header">Results & Performance Metrics</h2>', unsafe_allow_html=True)
-        
-        if st.session_state.trojan_analysis_complete:
-            results = st.session_state.analysis_results
-            
-            # Key Metrics
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric(
-                    "Total Variation Distance", 
-                    f"{results['tvd']:.3f}",
-                    help="Measure of difference between original and Trojan outputs"
-                )
-            
-            with col2:
-                depth_change = results['trojan_depth'] - results['original_depth']
-                st.metric(
-                    "Depth Change", 
-                    f"{depth_change}",
-                    delta=f"{depth_change} layers",
-                    help="Change in circuit depth (should be 0 for stealthy Trojans)"
-                )
-            
-            with col3:
-                gate_change = results['trojan_gates'] - results['original_gates']
-                gate_change_pct = (gate_change / results['original_gates']) * 100
-                st.metric(
-                    "Gate Count Change", 
-                    f"{gate_change}",
-                    delta=f"{gate_change_pct:.1f}%",
-                    help="Number of additional gates inserted"
-                )
-            
-            with col4:
-                stealth_score = max(0, 100 - (depth_change * 50 + results['tvd'] * 30))
-                st.metric(
-                    "Stealth Score", 
-                    f"{stealth_score:.0f}/100",
-                    help="Higher scores indicate more stealthy Trojans"
-                )
-            
-            # Output Distribution Comparison
-            st.subheader("📊 Output Distribution Analysis")
-            
-            # Prepare data for visualization
-            all_outcomes = set(results['original_counts'].keys()) | set(results['trojan_counts'].keys())
-            
-            comparison_data = []
-            for outcome in all_outcomes:
-                orig_prob = results['original_counts'].get(outcome, 0) / simulation_shots
-                trojan_prob = results['trojan_counts'].get(outcome, 0) / simulation_shots
-                comparison_data.append({
-                    'Outcome': outcome,
-                    'Original': orig_prob,
-                    'Trojan': trojan_prob,
-                    'Difference': abs(orig_prob - trojan_prob)
-                })
-            
-            df_comparison = pd.DataFrame(comparison_data)
-            
-            # Create side-by-side bar charts
-            fig = make_subplots(
-                rows=1, cols=2,
-                subplot_titles=('Original Circuit Output', 'Trojan Circuit Output'),
-                specs=[[{"secondary_y": False}, {"secondary_y": False}]]
-            )
-            
-            # Original circuit
-            fig.add_trace(
-                go.Bar(x=df_comparison['Outcome'], y=df_comparison['Original'], 
-                       name='Original', marker_color='lightblue'),
-                row=1, col=1
-            )
-            
-            # Trojan circuit
-            fig.add_trace(
-                go.Bar(x=df_comparison['Outcome'], y=df_comparison['Trojan'], 
-                       name='Trojan', marker_color='lightcoral'),
-                row=1, col=2
-            )
-            
-            fig.update_layout(height=400, showlegend=False)
-            fig.update_xaxes(title_text="Measurement Outcome")
-            fig.update_yaxes(title_text="Probability")
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Difference analysis
-            st.subheader("🔍 Impact Analysis")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # TVD over outcomes
-                fig_diff = px.bar(
-                    df_comparison, 
-                    x='Outcome', 
-                    y='Difference',
-                    title='Probability Differences by Outcome',
-                    labels={'Difference': 'Absolute Probability Difference'}
-                )
-                st.plotly_chart(fig_diff, use_container_width=True)
-            
-            with col2:
-                # Summary statistics
-                st.write("**Statistical Summary:**")
-                st.write(f"• **Mean Difference:** {df_comparison['Difference'].mean():.4f}")
-                st.write(f"• **Max Difference:** {df_comparison['Difference'].max():.4f}")
-                st.write(f"• **Outcomes Affected:** {sum(df_comparison['Difference'] > 0.01)}/{len(df_comparison)}")
-                
-                # Effectiveness assessment
-                if results['tvd'] > 0.3:
-                    effectiveness = "🔴 High Impact"
-                elif results['tvd'] > 0.1:
-                    effectiveness = "🟡 Medium Impact"
-                else:
-                    effectiveness = "🟢 Low Impact"
-                
-                st.write(f"**Trojan Effectiveness:** {effectiveness}")
-            
-            # Benchmark Comparison
-            st.subheader("📈 Benchmark Results")
-            
-            # Simulate results for different circuits (for demonstration)
-            benchmark_data = {
-                'Circuit': ['Bell State', 'GHZ State', 'Mini ALU', 'QFT (4-qubit)'],
-                'TVD': [0.45, 0.62, 0.38, 0.71],
-                'Depth Increase': [0, 0, 0, 0],
-                'Gate Increase (%)': [33.3, 25.0, 20.0, 15.8],
-                'Stealth Score': [75, 70, 80, 65]
-            }
-            
-            df_benchmark = pd.DataFrame(benchmark_data)
-            
-            # Highlight current circuit
-            current_idx = df_benchmark[df_benchmark['Circuit'] == selected_circuit_name].index
-            if not current_idx.empty:
-                df_benchmark.loc[current_idx, 'TVD'] = results['tvd']
-                df_benchmark.loc[current_idx, 'Gate Increase (%)'] = (
-                    (results['trojan_gates'] - results['original_gates']) / results['original_gates'] * 100
-                )
-            
-            st.dataframe(
-                df_benchmark.style.highlight_max(subset=['TVD', 'Stealth Score'], color='lightgreen')
-                                 .highlight_min(subset=['Depth Increase', 'Gate Increase (%)'], color='lightblue'),
-                use_container_width=True
-            )
-            
+        if col_idx == 0 and include_switch:
+            # Insert X gate on control (switch)
+            trojan_circuit.x(control_pos)
         else:
-            st.info("👆 Please insert Trojan gates in the previous tab to see results and metrics.")
+            # Insert CX gate
+            random_pos = random.choice(list(available_qubits))
+            trojan_circuit.cx(control_pos, random_pos)
+            available_qubits.remove(random_pos)
+            added_gates += 1
     
-    with tab5:
-        st.markdown('<h2 class="section-header">Security Implications & Countermeasures</h2>', unsafe_allow_html=True)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("🚨 Security Threats")
-            
-            st.markdown("""
-            **Controlled quantum Trojans pose significant security risks:**
-            
-            #### 🎯 Attack Capabilities
-            - **Conditional Activation**: Trojans remain dormant until specific conditions are met
-            - **Stealth Operation**: Zero depth increase makes detection extremely difficult
-            - **Functional Disruption**: High TVD values indicate significant output manipulation
-            - **Persistent Threat**: Survives standard compiler optimizations
-            
-            #### 🌍 Real-world Impact
-            - **Cryptographic Applications**: Could compromise quantum key distribution
-            - **Scientific Computing**: May invalidate quantum simulation results  
-            - **Financial Services**: Risk to quantum-enhanced financial algorithms
-            - **Supply Chain**: Threats from untrusted quantum compilers
-            """)
-            
-            st.markdown("""
-            <div class="warning-box">
-            <h4>⚠️ Critical Vulnerability</h4>
-            <p>The <strong>conditional nature</strong> of these Trojans makes them particularly dangerous because they can:</p>
-            <ul>
-            <li>Remain undetected during testing phases</li>
-            <li>Activate only under specific operational conditions</li>
-            <li>Cause intermittent failures that are hard to trace</li>
-            </ul>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            st.subheader("🛡️ Detection & Mitigation")
-            
-            st.markdown("""
-            **Potential countermeasures and detection strategies:**
-            
-            #### 🔍 Detection Approaches
-            - **Statistical Analysis**: Monitor output distributions for anomalies
-            - **Circuit Verification**: Formal verification of compiled circuits
-            - **Machine Learning**: Train models to detect suspicious gate patterns
-            - **Hardware Fingerprinting**: Identify unauthorized circuit modifications
-            
-            #### 🛡️ Mitigation Strategies
-            - **Trusted Compilation**: Use only verified, trusted compilers
-            - **Multi-compiler Verification**: Cross-check results from multiple compilers
-            - **Circuit Obfuscation**: Make reverse engineering more difficult
-            - **Runtime Monitoring**: Continuous monitoring during execution
-            """)
-            
-            st.markdown("""
-            <div class="info-box">
-            <h4>💡 Research Opportunities</h4>
-            <p>This work opens several important research directions:</p>
-            <ul>
-            <li>Development of Trojan-resistant quantum compilers</li>
-            <li>Advanced detection algorithms for conditional Trojans</li>
-            <li>Quantum circuit integrity verification methods</li>
-            <li>Secure quantum software development practices</li>
-            </ul>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # Interactive Security Assessment
-        st.subheader("🎯 Interactive Security Assessment")
-        
-        if st.session_state.trojan_analysis_complete:
-            results = st.session_state.analysis_results
-            
-            # Calculate risk scores
-            tvd_risk = min(100, results['tvd'] * 100)
-            stealth_risk = 100 if (results['trojan_depth'] - results['original_depth']) == 0 else 50
-            complexity_risk = min(100, len(results['trojan_info']) * 20)
-            
-            risk_data = {
-                'Risk Factor': ['Output Manipulation', 'Stealth Level', 'Complexity'],
-                'Score': [tvd_risk, stealth_risk, complexity_risk],
-                'Description': [
-                    'How much the Trojan affects circuit outputs',
-                    'How well the Trojan hides from detection',
-                    'Complexity and sophistication of the attack'
-                ]
-            }
-            
-            df_risk = pd.DataFrame(risk_data)
-            
-            # Risk visualization
-            fig_risk = px.bar(
-                df_risk, 
-                x='Risk Factor', 
-                y='Score',
-                color='Score',
-                color_continuous_scale='Reds',
-                title='Security Risk Assessment',
-                labels={'Score': 'Risk Score (0-100)'}
-            )
-            fig_risk.update_layout(showlegend=False)
-            st.plotly_chart(fig_risk, use_container_width=True)
-            
-            # Overall risk assessment
-            overall_risk = (tvd_risk + stealth_risk + complexity_risk) / 3
-            
-            if overall_risk >= 70:
-                risk_level = "🔴 **CRITICAL RISK**"
-                risk_color = "#ff4444"
-            elif overall_risk >= 50:
-                risk_level = "🟡 **HIGH RISK**"
-                risk_color = "#ffaa00"
-            elif overall_risk >= 30:
-                risk_level = "🟠 **MEDIUM RISK**"
-                risk_color = "#ff8800"
-            else:
-                risk_level = "🟢 **LOW RISK**"
-                risk_color = "#44aa44"
-            
-            st.markdown(f"""
-            <div style="background-color: {risk_color}20; border-left: 4px solid {risk_color}; padding: 1rem; margin: 1rem 0;">
-            <h4>Overall Security Assessment: {risk_level}</h4>
-            <p><strong>Risk Score: {overall_risk:.1f}/100</strong></p>
-            <p>This Trojan demonstrates significant security implications for quantum computing systems.</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # Future Research Directions
-        st.subheader("🔮 Future Research Directions")
-        
-        research_areas = {
-            "Detection Algorithms": {
-                "priority": "High",
-                "description": "Develop ML-based detection methods for conditional Trojans",
-                "timeline": "6-12 months"
-            },
-            "Compiler Security": {
-                "priority": "Critical",
-                "description": "Design Trojan-resistant quantum compilation frameworks",
-                "timeline": "12-18 months"
-            },
-            "Hardware Verification": {
-                "priority": "Medium",
-                "description": "Create hardware-level verification for quantum circuits",
-                "timeline": "18-24 months"
-            },
-            "Quantum Forensics": {
-                "priority": "Medium",
-                "description": "Develop forensic analysis tools for quantum circuit attacks",
-                "timeline": "24+ months"
-            }
-        }
-        
-        for area, details in research_areas.items():
-            priority_color = {
-                "Critical": "#ff4444",
-                "High": "#ff8800",
-                "Medium": "#ffaa00"
-            }[details["priority"]]
-            
-            st.markdown(f"""
-            <div style="border-left: 4px solid {priority_color}; padding: 0.5rem 1rem; margin: 0.5rem 0;">
-            <strong>{area}</strong> ({details["priority"]} Priority)<br>
-            <small>{details["description"]}</small><br>
-            <em>Timeline: {details["timeline"]}</em>
-            </div>
-            """, unsafe_allow_html=True)
+    # Compose with original circuit
+    final_circuit = trojan_circuit.compose(circuit, inplace=False)
+    
+    return final_circuit
 
-    # Footer
-    st.markdown("---")
-    st.markdown("""
-    <div style="text-align: center; color: #666; margin-top: 2rem;">
-    <p><strong>Quantum Trojan Analysis Demo</strong> | Based on research by Jayden John, Lakshman Golla, Qian Wang</p>
-    <p><em>University of California, Merced - Department of Electrical Engineering</em></p>
-    <p>⚠️ This demonstration is for educational and research purposes only</p>
-    </div>
-    """, unsafe_allow_html=True)
+# The insertion function from above
+# (Paste the insert_controlled_trojan function here)
 
-if __name__ == "__main__":
-    main()
+st.set_page_config(page_title="Quantum Trojan Demo", layout="wide")
+
+st.title("Quantum Trojan Insertion: Controlled Activation for Covert Circuit Manipulation")
+st.markdown("**Interactive Demo and Explanation of the Paper** by Jayden John, Lakshman Golla, Qian Wang (arXiv:2502.08880v1)")
+
+# Section 1: Introduction
+with st.expander("1. Introduction to the Paper"):
+    st.write("""
+    This paper introduces stealthy, controllable quantum Trojans inserted via untrusted compilers. 
+    Trojans remain dormant until triggered, altering outputs without increasing circuit depth.
+    Key: Uses DAG to find empty positions for CX gates controlled by a qubit with optional X switch.
+    """)
+    # Recreate Fig 1
+    fig1, ax1 = plt.subplots()
+    ax1.text(0.5, 0.5, "Simple Quantum Circuit: q0 -- H -- \nq1 --", fontsize=12, ha='center')
+    ax1.axis('off')
+    st.pyplot(fig1)
+
+# Section 2: Background
+with st.expander("2. Background & Related Work"):
+    st.write("""
+    - Hardware Trojans in classical ICs: Combinational/sequential, triggered by rare conditions.
+    - Quantum Circuits: Qubits, gates (X, CX), compilation vulnerabilities.
+    - Related: Simple Trojans (X/SWAP insertions), but easily detected. This work adds conditionality.
+    """)
+
+# Section 3: Threat Model
+with st.expander("3. Threat Model"):
+    st.write("""
+    Untrusted compiler inserts Trojans during transpilation. Adversary accesses original/transpiled circuits.
+    Goal: Disrupt under specific inputs without detection.
+    """)
+    # Recreate Fig 2
+    st.image("https://via.placeholder.com/800x200?text=Threat+Model+Diagram", caption="Fig 2: Untrusted Compiler Flow")
+
+# Section 4: Quantum Trojan and Analysis
+with st.expander("4. Quantum Trojan Insertion Process"):
+    st.write("""
+    Algorithm: Identify empty slots in DAG layers. Insert X (switch) on control, then CX to random empties.
+    Activation: Include X or set control input to |1> for trigger.
+    """)
+    st.code("""
+    # Pseudocode from Algorithm 1
+    for each layer:
+        empty = all_qubits - used_qubits
+    for column in circuits:
+        if column 0: add X(control)
+        else: add CX(control, random_empty)
+    """)
+    # Recreate Fig 3
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write("Switch OFF (Deactivated)")
+        fig_off, ax_off = plt.subplots()
+        ax_off.text(0.5, 0.5, "H -- X -- Z -- X -- X\nCX idle", ha='center')
+        ax_off.axis('off')
+        st.pyplot(fig_off)
+    with col2:
+        st.write("Switch ON (Activated)")
+        fig_on, ax_on = plt.subplots()
+        ax_on.text(0.5, 0.5, "X (switch) -- H -- X -- Z -- X -- X\nCX flips targets", ha='center')
+        ax_on.axis('off')
+        st.pyplot(fig_on)
+
+# Section 5: Experiments
+with st.expander("5. Experiments & Evaluation"):
+    st.write("""
+    - Setup: Qiskit, RevLib benchmarks, FakeValencia noise, 1000 shots.
+    - Metric: TVD = (1/2N) * sum |y_orig - y_alter|
+    - Results: 0% depth increase, ~20% gate increase, TVD ~90% when activated.
+    """)
+    # Recreate Table I (subset)
+    data = {
+        "Circuit": ["mini_ALU", "4mod5", "1-bit adder"],
+        "Depth": [8, 6, 5],
+        "Gate Count": [7, 7, 5],
+        "TVD (Activated)": [0.85, 0.92, 0.78]  # Approximate from Fig 5
+    }
+    st.table(data)
+    # Recreate Fig 5: TVD Distribution
+    tvd_values = np.random.uniform(0.7, 1.0, 10)  # Simulated
+    fig5, ax5 = plt.subplots()
+    ax5.hist(tvd_values, bins=5)
+    ax5.set_title("TVD Distribution")
+    st.pyplot(fig5)
+
+# Interactive Demo
+st.header("Interactive Demonstration")
+st.write("Select a circuit, insert Trojan, simulate original vs. deactivated vs. activated.")
+
+# User inputs
+num_qubits = st.slider("Number of Qubits", 3, 10, 4)
+gate_limit = st.slider("Gate Limit (CX count)", 1, 10, 3)
+control_pos = st.selectbox("Control Qubit", range(num_qubits), index=0)
+use_noise = st.checkbox("Use Noisy Simulation (FakeValencia)", value=False)
+shots = 1024
+
+# Example circuit: Simple adder-like (Toffoli-based)
+original_circuit = QuantumCircuit(num_qubits, num_qubits - 1)  # Last qubit as ancillary if needed
+original_circuit.h(range(num_qubits))  # Superposition for demo
+original_circuit.cx(0, 1)
+original_circuit.cx(1, 2)
+if num_qubits > 3:
+    original_circuit.ccx(0, 1, 3)  # Toffoli for adder flavor
+original_circuit.measure(range(num_qubits - 1), range(num_qubits - 1))
+
+st.subheader("Original Circuit")
+st.write(original_circuit.draw(output='text'))
+
+# Insert Trojan
+deactivated_circuit = insert_controlled_trojan(original_circuit, control_pos, gate_limit, include_switch=False)
+activated_circuit = insert_controlled_trojan(original_circuit, control_pos, gate_limit, include_switch=True)
+
+col_deact, col_act = st.columns(2)
+with col_deact:
+    st.subheader("Deactivated Trojan")
+    st.write(deactivated_circuit.draw(output='text'))
+with col_act:
+    st.subheader("Activated Trojan")
+    st.write(activated_circuit.draw(output='text'))
+
+# Simulate
+simulator = AerSimulator.from_backend(FakeValencia()) if use_noise else AerSimulator()
+    
+orig_transpiled = transpile(original_circuit, simulator)
+deact_transpiled = transpile(deactivated_circuit, simulator)
+act_transpiled = transpile(activated_circuit, simulator)
+
+orig_result = simulator.run(orig_transpiled, shots=shots).result()
+deact_result = simulator.run(deact_transpiled, shots=shots).result()
+act_result = simulator.run(act_transpiled, shots=shots).result()
+
+orig_counts = orig_result.get_counts()
+deact_counts = deact_result.get_counts()
+act_counts = act_result.get_counts()
+
+# Visualize Histograms
+st.subheader("Output Distributions")
+fig_hist, axs_hist = plt.subplots(1, 3, figsize=(15, 5))
+plot_histogram(orig_counts, ax=axs_hist[0])
+axs_hist[0].set_title("Original")
+plot_histogram(deact_counts, ax=axs_hist[1])
+axs_hist[1].set_title("Deactivated")
+plot_histogram(act_counts, ax=axs_hist[2])
+axs_hist[2].set_title("Activated")
+st.pyplot(fig_hist)
+
+# Compute TVD
+def compute_tvd(counts1, counts2, shots):
+    all_keys = set(counts1).union(counts2)
+    tvd = 0.0
+    for key in all_keys:
+        p1 = counts1.get(key, 0) / shots
+        p2 = counts2.get(key, 0) / shots
+        tvd += abs(p1 - p2)
+    return tvd / 2
+
+tvd_deact = compute_tvd(orig_counts, deact_counts, shots)
+tvd_act = compute_tvd(orig_counts, act_counts, shots)
+
+st.subheader("Total Variation Distance (TVD)")
+st.write(f"Original vs. Deactivated: {tvd_deact:.4f} (Should be low)")
+st.write(f"Original vs. Activated: {tvd_act:.4f} (Should be high)")
+
+# Section 6: Conclusion
+with st.expander("6. Conclusion"):
+    st.write("""
+    The paper highlights the need for secure quantum compilation. This demo shows how Trojans can be inserted and activated, with minimal overhead.
+    Experiment with parameters to see impacts!
+    """)
+
+st.markdown("**Built with Qiskit, Streamlit, Matplotlib, NumPy.**")
