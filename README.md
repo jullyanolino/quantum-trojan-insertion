@@ -26,6 +26,18 @@ The research introduces a novel class of **controllable quantum Trojans** that c
 - **📊 Comprehensive Analysis**: TVD calculation and performance evaluation
 - **🔍 Visualization**: Circuit diagrams and impact comparisons
 
+## 📁 File Structure
+
+```
+quantum-trojan-demo/
+├── quantum_trojan_inserter.py    # Core implementation (main module)
+├── app.py                        # Streamlit interactive demo
+├── example_usage.py              # Comprehensive analysis examples
+├── requirements.txt              # Python dependencies
+├── README.md                     # This documentation
+└── trojan_analysis_results.csv   # Generated results (after running examples)
+```
+
 ## 🔧 Installation
 
 ### Prerequisites
@@ -57,7 +69,7 @@ pip install -r requirements.txt
 
 1. **Start the application**:
 ```bash
-streamlit run streamlit_app.py
+streamlit run app.py
 ```
 
 2. **Open your browser** and navigate to `http://localhost:8501`
@@ -71,7 +83,7 @@ streamlit run streamlit_app.py
 ### Using the Core Implementation
 
 ```python
-from quantum_trojan import QuantumTrojanInserter, create_benchmark_circuits
+from quantum_trojan_inserter import QuantumTrojanInserter, create_benchmark_circuits
 
 # Create a Trojan inserter
 trojan_inserter = QuantumTrojanInserter(control_qubit_index=0)
