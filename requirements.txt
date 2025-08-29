@@ -1,7 +1,7 @@
 # Requirements for Quantum Trojan Analysis Demo
 
 # Core quantum computing
-qiskit>=1.0.0
+qiskit>=2.0.0
 qiskit-aer>=0.13.0
 qiskit-algorithms>=0.3.0
 
