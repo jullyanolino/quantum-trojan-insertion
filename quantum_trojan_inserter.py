@@ -3,10 +3,34 @@ from qiskit import QuantumCircuit, transpile, ClassicalRegister, QuantumRegister
 from qiskit.dagcircuit import DAGCircuit
 from qiskit.converters import circuit_to_dag, dag_to_circuit
 from qiskit_aer import AerSimulator
-from qiskit.providers.fake_provider import FakeVigo
 import random
 from typing import List, Dict, Tuple, Set
 import copy
+
+# Compatibility function for different Qiskit versions
+def get_fake_backend():
+    """Get a fake backend for noise simulation, compatible across Qiskit versions."""
+    # Try different import paths for fake backends
+    try:
+        from qiskit.providers.fake_provider import FakeVigo
+        return FakeVigo()
+    except ImportError:
+        pass
+    
+    try:
+        from qiskit_ibm_runtime.fake_provider import FakeVigo
+        return FakeVigo()
+    except ImportError:
+        pass
+    
+    try:
+        from qiskit.providers.fake_provider import FakeManila
+        return FakeManila()
+    except ImportError:
+        pass
+    
+    # Fallback: return None (will use basic AerSimulator)
+    return None
 
 class QuantumTrojanInserter:
     """
@@ -157,9 +181,18 @@ class QuantumTrojanInserter:
                 sim_circuit.add_register(ClassicalRegister(sim_circuit.num_qubits))
             sim_circuit.measure_all()
         
-        # Use fake backend for realistic noise simulation
-        fake_backend = FakeVigo()
-        transpiled_circuit = transpile(sim_circuit, fake_backend)
+        # Try to use fake backend for realistic noise simulation
+        fake_backend = get_fake_backend()
+        
+        try:
+            if fake_backend is not None:
+                transpiled_circuit = transpile(sim_circuit, fake_backend)
+            else:
+                # No fake backend available, use basic transpilation
+                transpiled_circuit = transpile(sim_circuit, self.simulator)
+        except Exception:
+            # If transpilation with fake backend fails, fall back to basic
+            transpiled_circuit = transpile(sim_circuit, self.simulator)
         
         # Run simulation
         job = self.simulator.run(transpiled_circuit, shots=shots)
